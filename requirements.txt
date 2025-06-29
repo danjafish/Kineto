@@ -1,0 +1,8 @@
+fastapi>=0.95
+uvicorn>=0.22
+pydantic>=2.0
+pyyaml
+jinja2
+openai
+python-dotenv
+flake8
