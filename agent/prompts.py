@@ -22,18 +22,19 @@ Return only the Python code.
 # 2) Router for a specific tag
 CODE_GEN_ROUTER = """
 {system}
+
 Given this OpenAPI Paths snippet for tag "{tag}":
 {spec}
 
 Generate a fully working FastAPI `APIRouter` for tag "{tag}":
-  Import `APIRouter`, `HTTPException`, and any models from `app.models`.
-  Initialize an in-memory store (e.g. `items = []` or `dict()`) to back these endpoints.
-  router = APIRouter(prefix="/api/{tag_lower}", tags=["{tag}"])
-  For **each** operation:
-    Implement the handler to update/query the in-memory store.
-    Use correct `response_model`, `status_code`, and raise `HTTPException` for 404s.
-    e.g. for GET `/api/{tag_lower}`, return the full list; for POST, append and return the new item.
-    Ensure path parameters (like `{id}`) are handled and converted to the right types.
+  • Import `APIRouter`, `HTTPException`, and any models from `app.models`.
+  • Initialize an in-memory store (e.g. `items = []` or `dict()`) to back these endpoints.
+  • router = APIRouter(prefix="/api/{tag_lower}", tags=["{tag}"])
+  • For **each** operation:
+      – Implement the handler to update/query the in-memory store.
+      – Use correct `response_model`, `status_code`, and raise `HTTPException` for 404s.
+      – e.g. for GET `/api/{tag_lower}`, return the full list; for POST, append and return the new item.
+  • Ensure path parameters (like `{{id}}`) are handled and converted to the right types.
 
 Return only the Python code—no fences or commentary.
 """
@@ -41,17 +42,25 @@ Return only the Python code—no fences or commentary.
 # 3) Main application entrypoint
 CODE_GEN_MAIN = """
 {system}
-Given these servers and tags:
-servers: {servers}
-tags: {tags}
 
-Generate a FastAPI application entrypoint:
-  • from fastapi import FastAPI
-  • import each router module under app.routes (one per tag)
-  • include each router on `app` with proper prefixes and tags
-  • configure bearerAuth if specified
-  • add an `if __name__ == "__main__":` block with `uvicorn.run()`
-Return only the Python code.
+Generate the contents of `app/main.py` as follows:
+  • Import `FastAPI` from `fastapi` and `uvicorn`.
+  • Given these tags: {tags}
+  • For each tag in that list, import its router module under `app.routes`:
+      e.g. for tag "Notes":
+        `from app.routes.notes import router as notes_router`
+  • Instantiate the FastAPI app:
+      `app = FastAPI()`
+  • Include each router:
+      `app.include_router(notes_router)`
+      (repeat for each tag)
+  • Add the startup block:
+      ```python
+      if __name__ == "__main__":
+          uvicorn.run(app, host="127.0.0.1", port=8000)
+      ```
+
+Return only the Python source code—no fences or commentary.
 """
 
 # 4) requirements.txt
@@ -74,12 +83,11 @@ Return only the Dockerfile contents.
 
 # Generic refine prompt (can be reused for any file)
 REFINE = """
-{system}
-The code for "{filename}" failed with these errors:
-{errors}
+Here is the current implementation of "{filename}":
+{code}
 
-Here’s the original snippet used to generate it:
+Ensure that this implementation is correct, runnable, and performs all the required tasks as specified by the following OpenAPI snippet:
 {spec}
 
-Please provide corrected, working code for "{filename}" only—no fences or commentary.
+If any changes are needed to meet the spec, return only the corrected code; otherwise, you may return the original implementation.
 """

@@ -4,8 +4,8 @@ import os
 import json
 import yaml
 import logging
+
 from .llm_client import chat
-from .evaluator import evaluate
 from .prompts import (
     SYSTEM,
     CODE_GEN_MODELS,
@@ -15,8 +15,11 @@ from .prompts import (
     CODE_GEN_DOCKER,
     REFINE
 )
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger(name)
+
+# configure logging
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
+
 MAX_RETRIES = 2
 HTTP_METHODS = {"get", "post", "put", "patch", "delete", "options", "head"}
 
@@ -26,11 +29,8 @@ def load_openapi(path: str) -> dict:
     with open(path, 'r') as f:
         return yaml.safe_load(f)
 
+
 def build_file_specs(spec: dict) -> list:
-    """
-    Construct the list of (relative_path, filename, snippet_fn)
-    based on the OpenAPI spec.
-    """
     specs = []
 
     # 1) Pydantic models
@@ -40,85 +40,79 @@ def build_file_specs(spec: dict) -> list:
         lambda s: s.get('components', {}).get('schemas', {})
     ))
 
-    # Collect all tags only from actual HTTP operations
+    # 2) Discover tags on operations
     tags = sorted({
         tag
         for path_item in spec.get('paths', {}).values()
         for method, op in path_item.items()
-        if method.lower() in HTTP_METHODS
+        if method.lower() in HTTP_METHODS and isinstance(op, dict)
         for tag in op.get('tags', [])
     })
 
+    # If no tags are defined, create one default tag grouping all paths
+    if not tags:
+        tags = ['default']
+
+    # 3) One router per tag (or the single "default" tag)
     for tag in tags:
+        filename = f'{tag}.py' if tags != ['default'] else 'routes.py'
+        relpath  = f'app/routes/{filename}'
         specs.append((
-            f'app/routes/{tag.lower()}.py',
-            f'{tag}.py',
+            relpath,
+            filename,
             lambda s, tag=tag: {
-                'paths': {
-                    p: {
-                        m: d
-                        for m, d in s['paths'][p].items()
-                        if m.lower() in HTTP_METHODS and tag in d.get('tags', [])
+                # If default tag, include all paths; otherwise filter by tag
+                'paths': (
+                    s.get('paths', {}) if tag == 'default'
+                    else {
+                        p: {
+                            m: d for m, d in s['paths'][p].items()
+                            if m.lower() in HTTP_METHODS and isinstance(d, dict) and tag in d.get('tags', [])
+                        }
+                        for p in s.get('paths', {})
+                        if any(
+                            m.lower() in HTTP_METHODS and isinstance(d, dict) and tag in d.get('tags', [])
+                            for m, d in s['paths'][p].items()
+                        )
                     }
-                    for p in s.get('paths', {})
-                    if any(
-                        (m.lower() in HTTP_METHODS and tag in d.get('tags', []))
-                        for m, d in s['paths'][p].items()
-                    )
-                }
+                )
             }
         ))
 
-    # Main entrypoint
-    specs.append((
-        'app/main.py',
-        'main.py',
-        lambda s: {
-            'servers': s.get('servers', []),
-            'tags': tags
-        }
-    ))
-
-    # 4) requirements.txt
-    specs.append((
-        'requirements.txt',
-        'requirements.txt',
-        lambda s: ['fastapi', 'uvicorn', 'pydantic']
-    ))
-
-    # 5) Dockerfile
-    specs.append((
-        'Dockerfile',
-        'Dockerfile',
-        lambda s: {}
-    ))
+    # 4) Main entrypoint, requirements, Dockerfile as before...
+    specs.append(('app/main.py',      'main.py',      lambda s: {'servers': s.get('servers', []), 'tags': tags}))
+    specs.append(('requirements.txt','requirements.txt',lambda s: ['fastapi','uvicorn','pydantic']))
+    specs.append(('Dockerfile',      'Dockerfile',   lambda s: {}))
 
     return specs
 
 
+
 def run(spec_path: str, output_dir: str):
-    # 1) Load the spec
-    spec = load_openapi(spec_path)
     logger.info(f"Loading OpenAPI spec from {spec_path}")
-    os.makedirs(output_dir, exist_ok=True)
+    spec = load_openapi(spec_path)
+
     logger.info(f"Creating output directory at {output_dir}")
-    # 2) Prepare metadata container
+    os.makedirs(output_dir, exist_ok=True)
+
+    logger.info("Preparing metadata container")
     metadata = {
         'stack': 'Python 3.10+ + FastAPI',
         'files': []
     }
 
-    # 3) Generate each file according to spec
-    for rel_path, filename, snippet_fn in build_file_specs(spec):
+    file_specs = build_file_specs(spec)
+    logger.info(f"Will generate {len(file_specs)} files based on spec")
+
+    for rel_path, filename, snippet_fn in file_specs:
+        logger.info(f"=== Generating file: {rel_path} ===")
         snippet = snippet_fn(spec)
         spec_json = json.dumps(snippet, indent=2)
 
-        # Select the appropriate prompt
+        # Select the correct prompt template
         if filename == 'models.py':
             prompt = CODE_GEN_MODELS.format(system=SYSTEM, spec=spec_json)
-
         elif rel_path.startswith('app/routes/'):
-            # Derive the tag name from the filename (e.g. "notes.py" → "notes")
             base = os.path.splitext(filename)[0]
             tag_lower = base.lower()
             tag_cap = base.capitalize()
@@ -128,30 +122,31 @@ def run(spec_path: str, output_dir: str):
                 tag_lower=tag_lower,
                 spec=spec_json
             )
-
         elif filename == 'main.py':
             prompt = CODE_GEN_MAIN.format(
                 system=SYSTEM,
                 servers=json.dumps(snippet.get('servers', []), indent=2),
                 tags=json.dumps(snippet.get('tags', []), indent=2)
             )
-
         elif filename == 'requirements.txt':
             prompt = CODE_GEN_REQS.format(deps="\n".join(snippet))
-
         elif filename == 'Dockerfile':
             prompt = CODE_GEN_DOCKER
-
         else:
             raise RuntimeError(f"Unknown file type for prompt: {filename}")
 
-        # 4) Initial generation
+        # Send initial prompt
         messages = [
             {'role': 'system', 'content': SYSTEM},
-            {'role': 'user',   'content': prompt}
+            {'role': 'user', 'content': prompt}
         ]
+        # logger.debug(f"System Prompt for {filename}:\n{SYSTEM}")
+        # logger.debug(f"User Prompt for {filename}:\n{prompt}")
+        logger.info(f"Sending initial prompt for {filename} ({len(prompt)} chars)")
         code = chat(messages)
-
+        print('---------------')
+        logger.debug(f"LLM response for {filename} (first 500 chars):\n{code[:500]!r}")
+        print('---------------')
         entry = {
             'filename': rel_path,
             'initial_prompt': prompt,
@@ -159,47 +154,45 @@ def run(spec_path: str, output_dir: str):
             'refinements': []
         }
 
-        # Write out the file
+        # Write generated code to file
         out_path = os.path.join(output_dir, rel_path)
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         with open(out_path, 'w') as f:
             f.write(code)
+        logger.info(f"Wrote {rel_path}")
 
-        # 5) Evaluate + optional refinements
-        for attempt in range(MAX_RETRIES):
-            errors = evaluate(output_dir)
-            lint_errors = errors.get('lint', '')
-            if not lint_errors:
-                break
+        # Review & refine generated code against the spec
+        with open(out_path, 'r') as f:
+            current_code = f.read()
 
-            refine_prompt = REFINE.format(
-                system=SYSTEM,
-                filename=filename,
-                errors=lint_errors,
-                spec=spec_json
-            )
-            messages = [
-                {'role': 'system', 'content': SYSTEM},
-                {'role': 'user',   'content': refine_prompt}
-            ]
-            refined = chat(messages)
+        review_prompt = REFINE.format(
+            system=SYSTEM,
+            filename=filename,
+            code=current_code,
+            spec=spec_json
+        )
+        messages = [
+            {'role': 'system', 'content': SYSTEM},
+            {'role': 'user', 'content': review_prompt}
+        ]
+        # logger.debug(f"System Prompt for review of {filename}:\n{SYSTEM}")
+        # logger.debug(f"Review Prompt for {filename}:\n{review_prompt}")
+        logger.info(f"Sending review prompt for {filename}")
+        reviewed = chat(messages)
 
-            entry['refinements'].append({
-                'attempt': attempt + 1,
-                'prompt': refine_prompt,
-                'response': refined,
-                'errors': lint_errors
-            })
-
-            # Overwrite with refined code
-            with open(out_path, 'w') as f:
-                f.write(refined)
+        entry['refinements'].append({
+            'prompt': review_prompt,
+            'response': reviewed
+        })
+        with open(out_path, 'w') as f:
+            f.write(reviewed)
+        logger.info(f"Applied review/refinement for {filename}")
 
         metadata['files'].append(entry)
 
-    # 6) Write metadata.json
+    # Write metadata.json
     meta_file = os.path.join(output_dir, 'metadata.json')
     with open(meta_file, 'w') as f:
         json.dump(metadata, f, indent=2)
-
+    logger.info(f"Generation complete. Metadata written to {meta_file}")
     print(f"Generation complete: see `{meta_file}` for details.")
