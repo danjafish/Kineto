@@ -2,10 +2,9 @@
 
 **Turn-key OpenAPI → FastAPI generator with tests & self-healing pipeline**
 
-##  Design & Evaluation Documentation
+## Design & Evaluation Documentation
 
->For a comprehensive deep-dive into architecture, evaluation approach, and future enhancements, see docs/DESIGN.md.
-
+> For a comprehensive deep-dive into architecture, evaluation approach, and future enhancements, see [docs/DESIGN.md](docs/DESIGN.md).
 
 ## What It Is
 
@@ -14,7 +13,7 @@ A fully automated Dockerized pipeline that:
 1. **Generates** a FastAPI backend (models, routes, main)
 2. **Autogenerates** pytest contract tests from your spec
 3. **Validates & self-heals** via 2× test→LLM-refine iterations
-4. **Serves** the final, passing application on port 8000
+4. **Serves** the final, passing application on port 8000
 
 ## Prerequisites
 
@@ -27,15 +26,18 @@ A fully automated Dockerized pipeline that:
 
    * Reads `/spec/openapi.yaml`
    * Runs `generator.py` → emits `app/`, `tests/`, `metadata.json`
+
 2. **Start & Test**
 
    * Launches Uvicorn serving the generated code
    * Executes `pytest tests/test_api.py` (verbose), logs to `test_results.log`
-3. **Refine** (if failures)
+
+3. **Refine** *(in case of test failure)*
 
    * Calls `refiner.py` with spec, code, and error log
    * Patches `app/routes/*.py` via LLM, logs each prompt/response in `refiner_log.json`
    * Repeats testing once more
+
 4. **Final Serve**
 
    * If all tests pass, keeps Uvicorn in the foreground
@@ -48,22 +50,21 @@ A fully automated Dockerized pipeline that:
 docker build -t kineto-app .
 
 # 2) Invoke end-to-end pipeline
-docker run --rm \
-  -v /path/to/spec:/spec \
-  -v /path/to/output:/app \
-  -p 8000:8000 \
-  kineto-app \
+docker run --rm   \
+  -v /path/to/spec:/spec   \
+  -v /path/to/output:/app   \
+  -p 8000:8000   \
+  kineto-app   \
   /spec/openapi.yaml /app
 ```
 
 The container logs phases prefixed with **\[GEN]**, **\[RUN]**, **\[TEST]**, **\[REFINER]**, then final **\[RUN]**.
-
 Visit [http://localhost:8000/docs](http://localhost:8000/docs) for interactive API docs once complete.
 
 ## Code Structure
 
-* **generator.py**: orchestrates spec loading, file‐by‐file code generation via LLM, writes `metadata.json`.
-* **agent/**: contains:
+* **generator.py**: orchestrates spec loading, file-by-file code generation via LLM, writes `metadata.json`.
+* **agent/**
 
   * `llm_client.py` (OpenAI wrapper, logging controls)
   * `prompts.py` (all prompt templates: code gen, refine, tests)
@@ -88,4 +89,10 @@ uvicorn generated_app/app.main:app --reload
 pytest generated_app/tests
 ```
 
-> *Note: local mode does ****not**** include automatic testing or refinement loops; those run only in Docker.*
+> **Note:** local mode does **not** include automatic testing or refinement loops; those run only in Docker.
+> **Tip:** you can manually invoke `refiner.py` locally to perform additional self-healing iterations, experiment with alternative prompts, or adjust iteration counts.
+> **Advanced:** extend local mode with unlimited or customized refinement loops—for example, to explore how many iterations are needed or to test different prompt variants—by scripting repeated calls to:
+>
+> ```bash
+> python refiner.py path/to/openapi.yaml generated_app test_results.log
+> ```
