@@ -21,28 +21,50 @@ Return only the Python code.
 
 # 2) Router for a specific tag
 CODE_GEN_ROUTER = """
-{system}
+Given these OpenAPI snippets for tag "{tag}":
+PATHS:
+{paths}
+SCHEMAS:
+{schemas}
 
-Given this OpenAPI Paths snippet for tag "{tag}":
-{spec}
+Generate a fully working FastAPI `APIRouter` for tag "{tag}", implementing:
 
-Generate a fully working FastAPI `APIRouter` for tag "{tag}":
-  • Import `APIRouter`, `HTTPException`, and any models from `app.models`.
-  • Initialize an in-memory store (e.g. `items = []` or `dict()`) to back these endpoints.
-  • router = APIRouter(prefix="/api/{tag_lower}", tags=["{tag}"])
-  • For **each** operation:
-      – Implement the handler to update/query the in-memory store.
-      – Use correct `response_model`, `status_code`, and raise `HTTPException` for 404s.
-      – e.g. for GET `/api/{tag_lower}`, return the full list; for POST, append and return the new item.
-  • Ensure path parameters (like `{{id}}`) are handled and converted to the right types.
+1. Pydantic models:
+   • For creation: a `{tag}Create` model with only required fields.
+   • For update: a `{tag}Update` model with all optional fields.
+   • For responses: a `{tag}Response` model matching the schema (including `createdAt` etc.).
+   • An `ErrorResponse` model for error bodies.
 
-Return only the Python code—no fences or commentary.
+2. APIRouter setup:
+   router = APIRouter(prefix="/api/{tag_lower}", tags=["{tag}"])
+
+3. Endpoints:
+   • `@router.get("/", response_model=List[{tag}Response])` to *list* all items.
+   • `@router.post("/", response_model={tag}Response, status_code=201)` to *create*.
+       – Handler signature: `(item: {tag}Create)`.
+   • `@router.get("/{{id}}", response_model={tag}Response)` to *retrieve* by `id`.
+       – Use path parameter named `id`.
+   • `@router.patch("/{{id}}", response_model={tag}Response)` to *update* by `id`.
+       – Handler signature: `(id: str, item: {tag}Update)`.
+   • `@router.delete("/{{id}}", status_code=204)` to *delete* by `id`.
+
+4. In‐memory store:
+   • Use a `Dict[str, {tag}Response]` named `{tag_lower}_store` as your backing store.
+   • For create, generate a UUID for `id` and set `createdAt=datetime.utcnow()`.
+   • On errors (e.g. missing item), raise `HTTPException(status_code=…, detail=ErrorResponse(error=…).dict())`.
+
+5. Import statements:
+   • `from fastapi import APIRouter, HTTPException, status`
+   • `from typing import List, Dict`
+   • `from datetime import datetime`
+   • `from uuid import uuid4`
+   • `from app.models import {tag}Create, {tag}Update, {tag}Response, ErrorResponse`
+
+Return only the raw Python code—no markdown fences or commentary.
 """
 
 # 3) Main application entrypoint
 CODE_GEN_MAIN = """
-{system}
-
 Generate the contents of `app/main.py` as follows:
   • Import `FastAPI` from `fastapi` and `uvicorn`.
   • Given these tags: {tags}
@@ -59,6 +81,10 @@ Generate the contents of `app/main.py` as follows:
       if __name__ == "__main__":
           uvicorn.run(app, host="127.0.0.1", port=8000)
       ```
+Add a root endpoint, something like:
+   @app.get("/", include_in_schema=False)
+   def root():
+       return "message": "Welcome – see /docs for API docs"
 
 Return only the Python source code—no fences or commentary.
 """
@@ -90,4 +116,55 @@ Ensure that this implementation is correct, runnable, and performs all the requi
 {spec}
 
 If any changes are needed to meet the spec, return only the corrected code; otherwise, you may return the original implementation.
+"""
+
+# Generates pytest for all CRUD operations in your spec
+CODE_GEN_TESTS = """
+Generate a pytest module that exercises every operation in this OpenAPI spec:
+
+{spec}
+
+Requirements:
+  • Use `requests` and `pytest`.  
+  • One test function per endpoint+method (e.g. `test_get_items`, `test_post_item`).  
+  • For GETs without body: send GET, assert status code matches spec, and response JSON shape.  
+  • For POSTs: construct a minimal JSON body from the schema, send POST, assert 201 and response matches.  
+  • For path‐parameter operations: reuse an ID from a prior POST.  
+  • For error cases: e.g. GET non‐existent ID yields 404 and `{{\"error\": ...}}`.
+
+Return one `.py` file content—no fences or commentary.
+"""
+
+# Prompt to refine a single endpoint handler
+REFINE_ENDPOINT = """
+You are an expert Python developer specializing in FastAPI.
+
+Tests for the `{method} {path}` endpoint failed with these errors:
+{errors}
+
+Here is the current router code:
+{code}
+
+OpenAPI operation spec:
+{snippet}
+
+Please fix **only** the handler function for `{method} {path}` so that tests will pass.
+Return the **full updated** router file content, raw Python only.
+"""
+
+
+REFINE_ROUTER = """
+You are an expert FastAPI developer.
+
+All tests against this router failed to pass. Here’s the test error log:
+{errors}
+
+Here is the full router file "{filename}":
+{code}
+
+Here is the OpenAPI spec:
+{spec}
+
+Apply only the minimal changes needed to make this router pass the tests.
+Return the complete updated router file (raw Python only).
 """

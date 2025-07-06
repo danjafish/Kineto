@@ -13,11 +13,12 @@ from .prompts import (
     CODE_GEN_MAIN,
     CODE_GEN_REQS,
     CODE_GEN_DOCKER,
+    CODE_GEN_TESTS,
     REFINE
 )
 
 # configure logging
-logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES = 2
@@ -49,11 +50,15 @@ def build_file_specs(spec: dict) -> list:
         for tag in op.get('tags', [])
     })
 
-    # If no tags are defined, create one default tag grouping all paths
+    # If no tags, derive resource names from /api/<resource>
     if not tags:
-        tags = ['default']
+        tags = sorted({
+            path.strip('/').split('/')[1]
+            for path in spec.get('paths', {})
+            if path.startswith('/api/')
+        })
 
-    # 3) One router per tag (or the single "default" tag)
+    # One router per tag
     for tag in tags:
         filename = f'{tag}.py' if tags != ['default'] else 'routes.py'
         relpath  = f'app/routes/{filename}'
@@ -61,31 +66,48 @@ def build_file_specs(spec: dict) -> list:
             relpath,
             filename,
             lambda s, tag=tag: {
-                # If default tag, include all paths; otherwise filter by tag
                 'paths': (
                     s.get('paths', {}) if tag == 'default'
                     else {
                         p: {
-                            m: d for m, d in s['paths'][p].items()
-                            if m.lower() in HTTP_METHODS and isinstance(d, dict) and tag in d.get('tags', [])
+                            m: d
+                            for m, d in s['paths'][p].items()
+                            if m.lower() in HTTP_METHODS
+                            and isinstance(d, dict)
+                            and tag in d.get('tags', [])
                         }
                         for p in s.get('paths', {})
                         if any(
-                            m.lower() in HTTP_METHODS and isinstance(d, dict) and tag in d.get('tags', [])
+                            m.lower() in HTTP_METHODS
+                            and isinstance(d, dict)
+                            and tag in d.get('tags', [])
                             for m, d in s['paths'][p].items()
                         )
                     }
-                )
+                ),
+                # <-- Add schemas here so router prompt knows about all models
+                'schemas': s.get('components', {}).get('schemas', {})
             }
         ))
 
-    # 4) Main entrypoint, requirements, Dockerfile as before...
-    specs.append(('app/main.py',      'main.py',      lambda s: {'servers': s.get('servers', []), 'tags': tags}))
-    specs.append(('requirements.txt','requirements.txt',lambda s: ['fastapi','uvicorn','pydantic']))
-    specs.append(('Dockerfile',      'Dockerfile',   lambda s: {}))
+    # Main entrypoint, requirements, Dockerfile
+    specs.append((
+        'app/main.py',
+        'main.py',
+        lambda s: {'servers': s.get('servers', []), 'tags': tags}
+    ))
+    specs.append((
+        'requirements.txt',
+        'requirements.txt',
+        lambda s: ['fastapi', 'uvicorn', 'pydantic']
+    ))
+    specs.append((
+        'Dockerfile',
+        'Dockerfile',
+        lambda s: {}
+    ))
 
     return specs
-
 
 
 def run(spec_path: str, output_dir: str):
@@ -117,14 +139,13 @@ def run(spec_path: str, output_dir: str):
             tag_lower = base.lower()
             tag_cap = base.capitalize()
             prompt = CODE_GEN_ROUTER.format(
-                system=SYSTEM,
+                paths=json.dumps(snippet['paths'], indent=2),
+                schemas=json.dumps(snippet['schemas'], indent=2),
                 tag=tag_cap,
                 tag_lower=tag_lower,
-                spec=spec_json
             )
         elif filename == 'main.py':
             prompt = CODE_GEN_MAIN.format(
-                system=SYSTEM,
                 servers=json.dumps(snippet.get('servers', []), indent=2),
                 tags=json.dumps(snippet.get('tags', []), indent=2)
             )
@@ -140,13 +161,8 @@ def run(spec_path: str, output_dir: str):
             {'role': 'system', 'content': SYSTEM},
             {'role': 'user', 'content': prompt}
         ]
-        # logger.debug(f"System Prompt for {filename}:\n{SYSTEM}")
-        # logger.debug(f"User Prompt for {filename}:\n{prompt}")
         logger.info(f"Sending initial prompt for {filename} ({len(prompt)} chars)")
         code = chat(messages)
-        print('---------------')
-        logger.debug(f"LLM response for {filename} (first 500 chars):\n{code[:500]!r}")
-        print('---------------')
         entry = {
             'filename': rel_path,
             'initial_prompt': prompt,
@@ -175,8 +191,6 @@ def run(spec_path: str, output_dir: str):
             {'role': 'system', 'content': SYSTEM},
             {'role': 'user', 'content': review_prompt}
         ]
-        # logger.debug(f"System Prompt for review of {filename}:\n{SYSTEM}")
-        # logger.debug(f"Review Prompt for {filename}:\n{review_prompt}")
         logger.info(f"Sending review prompt for {filename}")
         reviewed = chat(messages)
 
@@ -194,5 +208,18 @@ def run(spec_path: str, output_dir: str):
     meta_file = os.path.join(output_dir, 'metadata.json')
     with open(meta_file, 'w') as f:
         json.dump(metadata, f, indent=2)
+
+    tests_dir = os.path.join(output_dir, 'tests')
+    os.makedirs(tests_dir, exist_ok=True)
+    full_spec = json.dumps(spec, indent=2)
+    prompt = CODE_GEN_TESTS.format(spec=full_spec)
+    messages = [
+        {'role': 'system', 'content': SYSTEM},
+        {'role': 'user', 'content': prompt}
+    ]
+    tests_code = chat(messages)
+    with open(os.path.join(tests_dir, 'test_api.py'), 'w') as f:
+        f.write(tests_code)
+    logger.info("Generated tests at tests/test_api.py")
     logger.info(f"Generation complete. Metadata written to {meta_file}")
     print(f"Generation complete: see `{meta_file}` for details.")
